@@ -1,0 +1,402 @@
+---
+title: "Converting Elan files to all other files"
+output: html_notebook
+---
+
+# Introduction
+
+This tutorial introduces the ways of converting Elan files to all other files, including Excel (csv and xlsx), and Text.
+
+## Structure of the folders
+
+You should set up three folders in your local computer, including 'InputFiles', 'ProcessingFiles', and 'OutputFiles'. In the folder titled 'OutputFiles', you should have another four folders within it, including 'CSV', 'Excel', 'Text_ALL', and 'Text_PNT'. Please use the exact names for your folders.
+
+## Set your working directory
+
+Before running this script, please set your working directory, which includes all the folders mentioned above.
+
+## Run the script
+
+### Install necessary packages if you don't have them
+
+```{r}
+#install these packages if you don't have them
+install.packages("writexl")
+install.packages("tuneR")
+install.packages("parallel")
+install.packages("audio")
+install.packages("xml2")
+```
+
+### Install the package 'elan' as it's a tricky one
+
+```{r}
+#run the following lines to get the 'elan' package
+library(devtools)
+install_github("dalejbarr/elan")
+```
+
+### Load all your packages
+
+```{r}
+#load all the necesary packages
+library(writexl)
+library(tuneR)
+library(parallel)
+library(audio)
+library(elan)
+library(xml2)
+```
+
+### Run the script
+
+```{r}
+options(scipen=999)
+
+convert_duration = function(duration){
+  duration = as.numeric(duration)
+  duration_str = as.character(duration)
+  #------------------------------------
+  
+  #mills = as.numeric(gsub(".*\\.","",format(round(duration, 3), nsmall = 3)))
+  mills = gsub(".*\\.","",format(round(duration, 3), nsmall = 3))
+  
+  #------------------------------------
+  secs = floor(duration%%60)
+  if(secs < 10){
+    secs = paste0('0', floor(secs))
+  }else{
+    secs = floor(secs)
+  }
+  #------------------------------------
+  mins = floor((duration/60)%%60)
+  if(mins < 10){
+    mins = paste0('0', floor(mins))
+  }else{
+    mins = floor(mins)
+  }
+  
+  #------------------------------------
+  hrs = floor((duration/(60*60))%%24)
+  if(hrs < 10){
+    hrs = paste0('0', floor(hrs))
+  }else{
+    hrs = floor(hrs)
+  }
+  tmp_time = paste0(hrs, ':', mins, ':', secs, '.', mills)
+  
+  return(tmp_time)
+}
+
+convert_to_msecs = function(mills){
+  msecs_digits = nchar(mills) - 3
+  msecs_pattern = paste0('^([0-9]{', msecs_digits, '})([0-9]+)$')
+  split_msecs = gsub(msecs_pattern, '\\1.\\2', mills)
+  return(split_msecs)
+}
+
+specify_decimal <- function(x) format(round(x, 3), nsmall=3)
+
+#======================================================================
+#======================================================================
+
+individual_columns = unlist(strsplit('PNT INT SP ENV', ' '))
+contiguous_columns = unlist(strsplit("Quotatives Me_possessive There's Social_info", ' '))
+keep_col_names = unlist(strsplit("PNT INT SP ENV Anonymity Quotatives Me_possessive There's Social_info", ' '))
+
+SS_eaf2df <- function(eaf_file) {
+  
+  final_df_col_names = c('Transcript', 'IU_number', 'start_time', 'end_time', 'speaker', 'IU', 'start_time_mills', 'end_time_mills')
+  final_df = data.frame(matrix(nrow = 0, ncol = length(final_df_col_names)))
+  names(final_df) = final_df_col_names
+  
+  #eaf_dat <- read_eaf(eaf_file)
+  eaf_dat <- efileAnnotations(eaf_file)
+  #eaf_dat$EXT_REF <- NULL
+  
+  #eaf_dat <- elanTree(eaf_file)
+  
+  #get names of tiers
+  eaf_tiers_all <- unique(eaf_dat$TIER_ID)
+  
+  eaf_tiers_all = eaf_tiers_all[!grepl(paste(c("Numbers", "Word_list", "LaBB", "Extra transcription section", "Powerhouse", "traini", "transcription"), collapse = "|"), eaf_tiers_all)]
+  
+  except_tiers = '!Numbers|!Word_list|!LaBB|!Extra transcription section|!Powerhouse|!traini|!transcription'
+  
+  eaf_dat$t0m <- as.numeric(unlist(lapply(eaf_dat$t0, convert_to_msecs)))
+  eaf_dat$t1m <- as.numeric(unlist(lapply(eaf_dat$t1, convert_to_msecs)))
+  eaf_dat$t0tm <- unlist(lapply(eaf_dat$t0m, convert_duration))
+  eaf_dat$t1tm <- unlist(lapply(eaf_dat$t1m, convert_duration))
+  
+  for(tier_i in keep_col_names){
+    
+    #extract the tier
+    eaf_tiers <- eaf_dat[grepl(paste0('^', tier_i), eaf_dat$TIER_ID),]
+    all_speakers <- unique(eaf_tiers$TIER_ID)
+    tmp_eaf_tiers_length = length(all_speakers)
+    
+    if(tmp_eaf_tiers_length > 0){
+      for(eaf_tiers_i in 1:tmp_eaf_tiers_length){
+        
+        #full tier name
+        speaker_tier <- all_speakers[eaf_tiers_i]
+        
+        if(length(speaker_tier) > 0){
+          
+          loop_final_df <- eaf_tiers[grepl(paste0('^', speaker_tier),  eaf_tiers$TIER_ID),]
+          names(loop_final_df) <- unlist(strsplit('speaker ANNOTATION_ID IU t0.id t0 t1.id t1 Transcript atype start_time_mills end_time_mills start_time end_time', ' '))
+          loop_final_df$IU_number = 1:nrow(loop_final_df)
+          loop_final_df = loop_final_df[,c('Transcript', 'IU_number', 'start_time', 'end_time', 'speaker', 'IU', 'start_time_mills', 'end_time_mills')]
+          loop_final_df$Transcript = gsub("./InputFiles/|.eaf", "", eaf_file)
+          
+          final_df = rbind(final_df, loop_final_df)
+        }
+        
+      }
+    }
+  }
+  
+  #fix quotatives
+  tmpq <- final_df[final_df$speaker == 'Quotatives',]
+  tmppnt <- final_df[grep('PNT', final_df$speaker),]
+  
+  if(nrow(tmpq) > 0){
+    
+    #start time
+    for(qi in 1:nrow(tmpq)){
+      
+      tmpl <- tmpq[qi,]
+      
+      # View(tmpl)
+      # View(tmppnt)
+      closestValueIndex <- which(abs(tmppnt$start_time_mills-tmpl$start_time_mills)==
+                                   min(abs(tmppnt$start_time_mills-tmpl$start_time_mills)))
+      closestValue <- tmppnt$start_time_mills[closestValueIndex]
+      
+      tmpdiff <- abs(closestValue - tmpl$start_time_mills)
+      
+      if(tmpdiff < 0.010){
+        final_df[final_df$IU_number == tmpq$IU_number[qi] &
+                   final_df$speaker == 'Quotatives', 'start_time_mills'] <- closestValue
+      }
+      
+    }
+    
+    #end time
+    for(qi in 1:nrow(tmpq)){
+      
+      tmpl <- tmpq[qi,]
+      
+      closestValueIndex <- which(abs(tmppnt$end_time_mills-tmpl$end_time_mills)==
+                                   min(abs(tmppnt$end_time_mills-tmpl$end_time_mills)))
+      closestValue <- tmppnt$end_time_mills[closestValueIndex]
+      
+      tmpdiff <- abs(closestValue - tmpl$end_time_mills)
+      
+      if(tmpdiff < 0.010){
+        final_df[final_df$IU_number == tmpq$IU_number[qi] &
+                   final_df$speaker == 'Quotatives', 'end_time_mills'] <- closestValue
+      }
+      
+    }
+  }
+  
+  return(final_df)
+}   
+
+
+in_files = dir("./InputFiles", pattern = ".eaf", full.names = TRUE)
+file_elan_names = c('Transcript', 'IU_number', 'start_time', 'end_time', 'speaker', 'IU', 'start_time_mills', 'end_time_mills',
+                    "Anonymity","Social_info","Linguistic_info","Quotatives","Me_possessive","There's","Social_info")
+final_df_elan = data.frame(matrix(nrow = 0, ncol = length(file_elan_names)))
+names(final_df_elan) = file_elan_names
+
+for(i in in_files){
+  print(i)
+  
+  #imports the Elan file and converts it to a data.frame
+  tmp_df = SS_eaf2df(i)
+  
+  #organises the IUs based on initial time
+  tmp_df = tmp_df[with(tmp_df, order(start_time)), ]
+  
+  #creates a column with the number ofm IUs
+  tmp_df$IU_number = 1:nrow(tmp_df)
+  
+  #tmp_df$sum <- tmp_df$end_time_mills - tmp_df$start_time_mills
+  
+  #extra tiers whose information is extracted and attached to the corresponding speaker
+  extra_tiers = c("Anonymity","Linguistic_info","Quotatives","Me_possessive","There's","Social_info")
+  #extra_tiers = c("Anonymity","Social_info","Linguistic_info","Quotative","Me_possessive","There's")
+  
+  #creates respective columns of extra tiers in the data.frame
+  for(extra_i in extra_tiers){
+    tmp_df[[extra_i]] = ""
+  }
+  
+  #creates atemporal data.frame with ONLY the extra tiers specified for extracting values
+  df_noExtra = tmp_df[!tmp_df$speaker %in% extra_tiers,]
+  df_noExtra$ordered = 1:nrow(df_noExtra)
+  
+  for(speaker_i in individual_columns){
+    #gets the names of the specified speaker
+    tmp_speaker_tier = unique(df_noExtra$speaker)[grepl(speaker_i, unique(df_noExtra$speaker))]
+    
+    #iterates for each extra tier
+    for(j in extra_tiers){
+      
+      #if the extra tier exists in the data frame
+      if(length(which(unique(tmp_df$speaker) == j)) != 0)
+      {
+        # if(j == "Anonymity" & speaker_i == 'INT'){
+        #   sfsgsg
+        # }
+        #stores the iterated extra tier
+        tmp_extra_tier = j
+        #the speaker tier PLUS the extra tier
+        tmp_tiers = c(tmp_speaker_tier, tmp_extra_tier)
+        #data frame with the speaker tier PLUS the extra tier
+        main_df = tmp_df[tmp_df$speaker %in% tmp_tiers,]
+        
+        #delete all empty IUs
+        main_df = main_df[main_df$IU != '',]
+        
+        #initital time of the data frame with speaker
+        init_main = main_df[main_df$speaker == tmp_speaker_tier, 'start_time_mills']
+        #final time of the data frame with speaker
+        end_main = main_df[main_df$speaker== tmp_speaker_tier, 'end_time_mills']
+        
+        #initital time of the data frame with extra tier
+        init_extra = main_df[main_df$speaker == tmp_extra_tier, 'start_time_mills']
+        #final time of the data frame with extra tier
+        end_extra = main_df[main_df$speaker == tmp_extra_tier, 'end_time_mills']
+        
+        tmp_main_df = main_df[main_df$speaker == tmp_speaker_tier,]
+        
+        #iterates for EACH extra tier interval
+        for(k in 1:length(init_extra)){
+          
+          #locates the start of all the intervals lower than the initial to find
+          tmp_lower_index_all = which(tmp_main_df[,'start_time_mills'] <= init_extra[k])
+          #tmp_lower_index = tmp_lower_index_all[length(tmp_lower_index_all)]
+          
+          if(length(tmp_lower_index_all) != 0){
+            #locates the row index of the first IU lower than the extra tier
+            tmp_lower_index = tmp_lower_index_all[tmp_lower_index_all[length(tmp_lower_index_all)]]
+            
+            #locates the row index of all the IUs higher than the extra tier
+            tmp_higher_index_all = which(tmp_main_df[,'end_time_mills'] >= end_extra[k])
+            
+            #if the first higer index is not equal to zero and the length of the lower index is not equal to zero
+            if(length(tmp_higher_index_all[1]) != 0 & length(tmp_lower_index) != 0){
+              
+              #if any of this is not NA
+              if(!is.na(tmp_higher_index_all[1]) & !is.na(tmp_lower_index)){
+                #sets the higer index
+                
+                #if the first index is larger than the lower index
+                if(tmp_higher_index_all[1] > tmp_lower_index){
+                  
+                  #check whether the upper boundary is inside an existing IU in the same speaker
+                  if(tmp_main_df[tmp_higher_index_all[1],'start_time_mills'] <= end_extra[k] &&
+                     tmp_main_df[tmp_higher_index_all[1],'start_time_mills'] <= init_extra[k]){
+                    if(abs(end_extra[k] - tmp_main_df[tmp_higher_index_all[1],'end_time_mills']) == 0.001 ){
+                      tmp_higher_index = tmp_higher_index_all[1] - 1
+                    }else{
+                      tmp_higher_index = tmp_higher_index_all[1]
+                    }
+                  }
+                }else{
+                  tmp_higher_index = tmp_higher_index_all[1]
+                }
+                
+                #check whether the upper boundary is inside an existing IU in the same speaker
+                if(tmp_main_df[tmp_higher_index_all[1],'start_time_mills'] <= end_extra[k] &&
+                   tmp_main_df[tmp_higher_index_all[1],'start_time_mills'] <= init_extra[k]){
+                  
+                  #the initial time in the speaker tier - data frame with ONLY speaker and extra tier
+                  initial_time = tmp_main_df[tmp_lower_index, 'start_time_mills']
+                  #the final time the speaker tier - data frame with ONLY speaker and extra tier
+                  final_time = tmp_main_df[tmp_higher_index, 'end_time_mills']
+                  
+                  #locates the IU interval in the main data frame - initial time
+                  one_init_lower = main_df[main_df$speaker == tmp_speaker_tier & main_df$start_time_mills == initial_time, 'IU_number']
+                  #locates the IU interval in the main data frame - final time
+                  one_init_upper = main_df[main_df$speaker == tmp_speaker_tier & main_df$end_time_mills == final_time, 'IU_number']
+                  
+                  #gets the row number of the speaker in which the extra tier interval should be attached - lower value
+                  lower_index = df_noExtra[df_noExtra$IU_number == one_init_lower, 'ordered']
+                  #gets the row number of the speaker in which the extra tier interval should be attached - upper value
+                  upper_index = df_noExtra[df_noExtra$IU_number == one_init_upper, 'ordered']
+                  
+                  #gets the label of the extra tier to be attached to the speaker IU
+                  tmp_extra_label = main_df[main_df$speaker == tmp_extra_tier & main_df$start_time_mills == init_extra[k], 'IU']
+                  
+                  #gets the text of the field
+                  tmp_existing_label = df_noExtra[lower_index,j]
+                  
+                  # if(j == "Quotatives" & k  == 5){
+                  #   asdfrf
+                  # }
+                  
+                  #if there is no previous label, the new label is added
+                  #if there is a label already, the new label is attached
+                  if(tmp_existing_label == ""){
+                    df_noExtra[lower_index:upper_index,j] = tmp_extra_label
+                  }else{
+                    df_noExtra[lower_index:upper_index,j] = paste(tmp_existing_label, tmp_extra_label, sep=',')
+                  }
+                  
+                }
+                
+              }
+            }
+          }
+          
+        }
+        
+      }
+    }
+    
+  }
+  
+  df_noExtra$IU_number = 1:nrow(df_noExtra)
+  
+  tmp_df_save = df_noExtra
+  tmp_df_save$ordered = NULL
+  tmp_df_save$start_time_mills = NULL
+  tmp_df_save$end_time_mills = NULL
+  rownames(tmp_df_save) <- NULL
+  
+  #ms saving
+  tmp_df_save_ms = tmp_df_save
+  tmp_name_ms = paste0("./OutputFiles/CSV/", gsub("./InputFiles/|.eaf", "", i), '.csv')
+  tmp_name_xlsx_ms = paste0("./OutputFiles/Excel/", gsub("./InputFiles/|.eaf", "", i), '.xlsx')
+  
+  # write.xlsx(tmp_df_save_ms, tmp_name_xlsx_ms, sheetName="Sheet1", col.names=TRUE, row.names=FALSE, append=FALSE)
+  write_xlsx(tmp_df_save_ms, tmp_name_xlsx_ms, col_names=TRUE)
+  write.csv(tmp_df_save_ms, tmp_name_ms)
+  
+  tmp_name_tab = paste0("./OutputFiles/TEXT_All/", gsub("./InputFiles/|.eaf", "", i), '.txt')
+  tmp_name_tab_PNT = paste0("./OutputFiles/Text_PNT/", gsub("./InputFiles/|.eaf", "", i), '.txt')
+  
+  #tab file
+  tdtf = tmp_df_save_ms[,c('start_time', 'speaker', 'IU')]
+  tdtf = tdtf[grepl(paste(individual_columns, collapse="|"), tdtf$speaker),]
+  
+  write.table(tdtf, tmp_name_tab, sep="\t", quote = F, row.names = F, col.names = F)
+  
+  #only PNT
+  txtin = tdtf[grep('^PNT', tdtf$speaker),]
+  txtout = txtin[,c('start_time', 'speaker', 'IU')]
+  write.table(txtout, tmp_name_tab_PNT, sep="\t", row.names = F, col.names = F, quote = F)
+  
+  final_df_elan = rbind(final_df_elan, df_noExtra)
+}
+
+final_df_elan$start_time_mills = NULL
+final_df_elan$end_time_mills = NULL
+write.csv(final_df_elan, './ProcessingFiles/all_files.csv')
+
+warnings()
+```
